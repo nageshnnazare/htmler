@@ -1,17 +1,20 @@
 #!/bin/bash
-# htmler.sh -- Convert .md files to a single tabbed HTML
+# htmler.sh -- Convert .md and code files to a single tabbed HTML
 #
 # Uses Python markdown library for proper semantic HTML conversion,
 # styled to match the nvim vscode dark theme + markview.nvim rendering.
 # Features: syntax-highlighted code blocks, light/dark mode toggle, custom output name.
-# v5: compact fixed-height header (doc dropdown + sidebar doc list) instead of wrapping tabs.
+# Supports: Markdown (.md), C/C++/CUDA (.c, .cpp, .cu, .h, .hpp) files.
+# Code files are automatically wrapped in markdown code blocks with syntax highlighting.
+# v6: Added support for C/C++/CUDA code files.
 #
-# Usage: ./htmler.sh [-o output.html] [-f file.md ...] [file.md ...]
+# Usage: ./htmler.sh [-o output.html] [-f file.md|file.c|file.cpp ...] [file ...]
 #   -o output.html   Name of the generated HTML (default: combine_docs.html)
-#   -f file.md       Include a specific .md file (repeatable). May also be given
-#                    as positional arguments. When any files are specified, ONLY
-#                    those files are included, in the order given.
-#   (no files)       Default: recursively discover every .md file under the cwd.
+#   -f file          Include a specific file (.md, .c, .cpp, .cu, .h, .hpp).
+#                    Repeatable. May also be given as positional arguments.
+#                    When any files are specified, ONLY those files are included,
+#                    in the order given.
+#   (no files)       Default: recursively discover every .md and code file under cwd.
 # Output: combine_docs.html (default) or specified file in the current directory
 # Author: Nagesh N Nazare
 
@@ -21,7 +24,7 @@ OUTPUT_NAME="combine_docs.html"
 MD_FILES=()
 
 usage() {
-    echo "Usage: $0 [-o output.html] [-f file.md ...] [file.md ...]" >&2
+    echo "Usage: $0 [-o output.html] [-f file.md|file.c|file.cpp ...] [file ...]" >&2
 }
 
 while getopts "o:f:h" opt; do
@@ -42,7 +45,19 @@ fi
 SCRIPT_DIR="$(pwd)"
 FINAL="$SCRIPT_DIR/$OUTPUT_NAME"
 
-TITLE="$(basename "$OUTPUT_NAME" .html | sed 's/[_-]/ /g')"
+# Try to get repo name and author from git remote
+if git_url=$(git config --get remote.origin.url 2>/dev/null); then
+    # Extract repo name and author from git URL (handles both SSH and HTTPS)
+    # SSH: git@github.com:user/repo.git -> user/repo
+    # HTTPS: https://github.com/user/repo.git -> user/repo
+    REPO_NAME=$(echo ${git_url} | sed 's|https://github.com/||' | sed 's|.git||')
+else
+    # Fall back to output filename
+    REPO_NAME="$(basename "$OUTPUT_NAME" .html | sed 's/[_-]/ /g')"
+fi
+
+# Construct title as "Author/RepoName"
+TITLE="$REPO_NAME"
 
 # Locate a usable Python 3 interpreter. Honor an explicit $PYTHON_BIN override,
 # otherwise probe common names/locations on PATH. This keeps the script portable
@@ -104,7 +119,8 @@ def collect_md_files(root):
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in skip and not d.startswith('.')]
         for fn in filenames:
-            if fn.lower().endswith('.md'):
+            fn_lower = fn.lower()
+            if fn_lower.endswith('.md') or fn_lower.endswith(('.c', '.cpp', '.cu', '.h', '.hpp')):
                 found.append(os.path.join(dirpath, fn))
     return found
 
@@ -125,6 +141,7 @@ def resolve_explicit(paths):
     Each argument may be a plain path or a glob pattern (e.g. dir1/*.md,
     docs/**/*.md). Patterns are matched relative to src_dir when not absolute.
     Order between arguments is preserved; matches within one glob are sorted.
+    Supports .md files and code files (.c, .cpp, .cu, .h, .hpp).
     """
     import glob as _glob
     resolved = []
@@ -140,8 +157,10 @@ def resolve_explicit(paths):
             matches = [base]
         for cand in matches:
             cand = os.path.normpath(cand)
-            if not cand.lower().endswith('.md'):
-                print("[!] Skipping non-markdown file:", cand, file=sys.stderr)
+            cand_lower = cand.lower()
+            # Accept .md files or code files
+            if not (cand_lower.endswith('.md') or cand_lower.endswith(('.c', '.cpp', '.cu', '.h', '.hpp'))):
+                print("[!] Skipping non-supported file:", cand, file=sys.stderr)
                 continue
             if not os.path.isfile(cand):
                 print("[!] Skipping missing file:", cand, file=sys.stderr)
@@ -280,6 +299,36 @@ def make_label(rel_path):
     return ' / '.join(cleaned) if cleaned else 'README'
 
 
+def get_language_from_extension(filepath):
+    """Map file extension to markdown language identifier."""
+    ext_map = {
+        '.c': 'c',
+        '.cpp': 'cpp',
+        '.cc': 'cpp',
+        '.cxx': 'cpp',
+        '.c++': 'cpp',
+        '.cu': 'cuda',
+        '.h': 'c',
+        '.hpp': 'cpp',
+    }
+    ext = os.path.splitext(filepath)[1].lower()
+    return ext_map.get(ext, 'text')
+
+
+def wrap_code_file_as_markdown(filepath):
+    """Read a code file and wrap it in a markdown fenced code block."""
+    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+        code_content = f.read()
+    
+    # Get the filename for a title
+    filename = os.path.basename(filepath)
+    lang = get_language_from_extension(filepath)
+    
+    # Create markdown with heading and code block
+    md_content = f"# {filename}\n\n```{lang}\n{code_content}\n```\n"
+    return md_content
+
+
 tabs = []
 for order, md_path in enumerate(md_files, start=1):
     rel_path = os.path.relpath(md_path, src_dir).replace(os.sep, '/')
@@ -288,8 +337,12 @@ for order, md_path in enumerate(md_files, start=1):
     label = make_label(rel_path)
     tab_name = "{0}. {1}".format(order, label)
 
-    with open(md_path, 'r') as f:
-        md_text = f.read()
+    # Check if it's a code file and wrap it in markdown
+    if rel_path.lower().endswith(('.c', '.cpp', '.cu', '.h', '.hpp')):
+        md_text = wrap_code_file_as_markdown(md_path)
+    else:
+        with open(md_path, 'r') as f:
+            md_text = f.read()
 
     md_converter.reset()
     body_html = md_converter.convert(md_text)
@@ -612,7 +665,7 @@ body.nav-condensed .nav-doc-title {
     font-size: 18px;
     font-weight: 800;
     letter-spacing: -0.02em;
-    text-transform: capitalize;
+    /*text-transform: capitalize;*/
     color: var(--accent);
     background: linear-gradient(180deg, var(--text-link-hover), var(--accent));
     -webkit-background-clip: text;
