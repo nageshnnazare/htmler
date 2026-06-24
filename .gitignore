@@ -1,0 +1,17 @@
+# Generated output
+combine_docs.html
+*.generated.html
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

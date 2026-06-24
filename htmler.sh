@@ -579,7 +579,13 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
 /* === Reset & base === */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-html { color-scheme: dark; scroll-behavior: smooth; }
+html {
+    color-scheme: dark;
+    scroll-behavior: smooth;
+    /* Honour the device safe-area (notch / home indicator) on iOS. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+}
 [data-theme="light"] { color-scheme: light; }
 
 body {
@@ -591,6 +597,8 @@ body {
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     transition: background 0.25s, color 0.25s;
+    /* Never let wide code/tables push the whole page sideways on small screens. */
+    overflow-x: hidden;
 }
 
 ::selection { background: var(--accent-strong); }
@@ -843,7 +851,7 @@ body.nav-condensed .nav-doc-title {
     background: var(--bg-search-overlay-inner);
     border: 1px solid var(--border-header);
     border-radius: 8px;
-    width: 720px;
+    width: min(720px, 94vw);
     max-height: 70vh;
     display: flex;
     flex-direction: column;
@@ -1399,6 +1407,20 @@ body.nav-condensed .nav-doc-title {
 }
 .tab-content tbody tr:hover td { background: var(--accent-soft); }
 
+/* Tables are wrapped (via JS) in a scroll container so wide tables never blow
+   out the layout; on narrow screens they scroll horizontally instead. */
+.table-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 18px 0;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+.table-scroll::-webkit-scrollbar { height: 8px; }
+.table-scroll::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; }
+.table-scroll > table { margin: 0; }
+
 /* === Horizontal rules === */
 .tab-content hr {
     border: none;
@@ -1420,15 +1442,24 @@ body.nav-condensed .nav-doc-title {
 .tab-content blockquote p:last-child { margin-bottom: 0; }
 
 /* === Responsive === */
+
+/* Media never overflows its container. */
+.tab-content img,
+.tab-content video,
+.tab-content svg { max-width: 100%; height: auto; }
+
+/* ---- Tablets & iPad (portrait + landscape): sidebars become overlay drawers ---- */
 @media (max-width: 1024px) {
-    .brand { display: none; }
-    .content-area { padding: calc(var(--header-height) + 20px) 16px 64px; }
+    /* Keep the sidebar toggle reachable; just drop the long collection title so
+       the controls fit. The condensed title still names the current doc. */
+    .brand-name { display: none; }
+    .brand { margin-right: 0; }
+
+    .content-area { padding: calc(var(--header-height) + 18px) 20px 64px; }
     .tab-content { padding: 26px 22px 40px; border-radius: var(--radius-md); }
-    .search-widget input { width: 150px; }
-    .search-widget input:focus { width: 200px; }
     .search-kbd { display: none; }
 
-    /* Sidebars overlay logic on tablets/mobile */
+    /* Sidebars float over the content instead of squeezing it. */
     .sidebar-nav, .toc-sidebar {
         position: fixed;
         top: 0;
@@ -1437,21 +1468,15 @@ body.nav-condensed .nav-doc-title {
         background: var(--bg-sidebar);
         box-shadow: var(--shadow-lg);
     }
-    .sidebar-nav {
-        left: 0;
-        border-right: 1px solid var(--border-main);
-    }
-    .toc-sidebar {
-        right: 0;
-        border-left: 1px solid var(--border-main);
-    }
-    
-    /* Backdrop when sidebar is active */
+    .sidebar-nav { left: 0; border-right: 1px solid var(--border-main); }
+    .toc-sidebar { right: 0; border-left: 1px solid var(--border-main); }
+
+    /* Dimmed, blurred backdrop while either drawer is open. */
     body::before {
         content: "";
         position: fixed;
-        top: 0; left: 0; right: 0; bottom: 0;
-        background: rgba(0,0,0,0.4);
+        inset: 0;
+        background: rgba(0,0,0,0.45);
         backdrop-filter: blur(4px);
         -webkit-backdrop-filter: blur(4px);
         z-index: 140;
@@ -1465,12 +1490,69 @@ body.nav-condensed .nav-doc-title {
         pointer-events: auto;
     }
 }
-@media (max-width: 600px) {
-    .doc-selector-label { display: none; }
-    .sidebar-nav, .toc-sidebar {
-        width: 80vw;
-        min-width: 80vw;
+
+/* ---- Small tablets / large phones (e.g. iPad portrait, big phones) ---- */
+@media (max-width: 768px) {
+    /* Respect the notch / rounded corners on iOS. */
+    .header-inner {
+        gap: 8px;
+        padding-left: max(12px, env(safe-area-inset-left));
+        padding-right: max(12px, env(safe-area-inset-right));
     }
+    /* Let the document picker take whatever width is left. */
+    .doc-selector { flex: 1 1 auto; }
+    .doc-select { min-width: 0; max-width: none; width: 100%; }
+
+    .content-area {
+        padding-left: max(14px, env(safe-area-inset-left));
+        padding-right: max(14px, env(safe-area-inset-right));
+        padding-top: calc(var(--header-height) + 14px);
+        padding-bottom: 56px;
+    }
+    /* Edge-to-edge reading panel on small screens. */
+    .tab-content { padding: 22px 16px 36px; border: none; border-radius: 0; box-shadow: none; }
+    .tab-content h1 { font-size: 1.7em; }
+    .tab-content h2 { font-size: 1.34em; }
+    .tab-content h3 { font-size: 1.16em; }
+
+    /* Wide tables grow to their content and scroll inside the wrapper. */
+    .table-scroll > table { width: auto; min-width: 100%; }
+    /* Long unbroken tokens wrap instead of overflowing. */
+    .tab-content p code, .tab-content li code { overflow-wrap: anywhere; word-break: break-word; }
+
+    .sidebar-nav, .toc-sidebar { width: min(86vw, 340px); min-width: 0; }
+}
+
+/* ---- Phones ---- */
+@media (max-width: 600px) {
+    :root { --header-height: 52px; }
+    body { font-size: 15px; }
+    .doc-selector-label { display: none; }
+    .header-inner { gap: 6px; }
+    .search-widget { gap: 6px; }
+    /* Comfortable tap targets. */
+    .brand-toggle, .theme-toggle, .search-toggle, .toc-toggle { width: 38px; height: 38px; }
+    .content-area { padding-top: calc(var(--header-height) + 10px); padding-bottom: 48px; }
+    .tab-content { padding: 18px 14px 32px; }
+    .tab-content h1 { font-size: 1.5em; padding-bottom: 12px; margin-bottom: 18px; }
+    .tab-content h2 { margin: 30px 0 12px; }
+    .tab-content pre { padding: 14px 14px 12px; }
+    /* No hover on touch, so keep the copy button visible. */
+    .code-copy-btn { opacity: 1; transform: none; }
+    .nav-doc-title { max-width: 64vw; font-size: 13px; padding: 6px 14px; }
+}
+
+/* ---- Very small phones ---- */
+@media (max-width: 380px) {
+    .header-inner { gap: 4px; padding-left: 8px; padding-right: 8px; }
+    .brand-toggle, .theme-toggle, .search-toggle, .toc-toggle { width: 36px; height: 36px; }
+    .tab-content { padding: 16px 11px 28px; }
+}
+
+/* Devices that can't hover (touch): always show the copy button. */
+@media (hover: none) {
+    .code-copy-btn { opacity: 1; transform: none; }
+    .tab-content pre:hover .code-lang-label { opacity: 1; }
 }
 
 /* === Print === */
@@ -1814,6 +1896,18 @@ function highlightAllCode() {
 }
 
 highlightAllCode();
+
+/* ───── Wrap tables so they scroll horizontally on narrow screens ───── */
+function wrapTables() {
+    document.querySelectorAll('.tab-content table').forEach(table => {
+        if (table.parentElement && table.parentElement.classList.contains('table-scroll')) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'table-scroll';
+        table.parentNode.insertBefore(wrap, table);
+        wrap.appendChild(table);
+    });
+}
+wrapTables();
 
 /* ───── Theme toggle ───── */
 
