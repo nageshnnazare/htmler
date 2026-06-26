@@ -2437,6 +2437,12 @@ function gotoAnchor(idx, anchor) {
 document.addEventListener('click', function(e) {
     const link = e.target.closest('a[href]');
     if (!link) return;
+    // Only handle links that live inside document content. Links in the
+    // sidebars (TOC "on this page", document list) have their own handlers;
+    // letting this run for them would resolve duplicate heading ids against
+    // the wrong panel (every same-template doc shares the same ids).
+    const ownerPanel = link.closest('.tab-content');
+    if (!ownerPanel) return;
     const href = link.getAttribute('href');
     if (!href) return;
 
@@ -2444,7 +2450,6 @@ document.addEventListener('click', function(e) {
     if (href.charAt(0) === '#') {
         const id = href.substring(1);
         if (!id) return;
-        const ownerPanel = link.closest('.tab-content');
         const target = findById(id, ownerPanel);
         if (target) {
             e.preventDefault();
