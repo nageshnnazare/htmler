@@ -714,8 +714,9 @@ body {
     transition: opacity 0.25s ease, transform 0.25s ease;
 }
 
-/* Condensed: keep the toggle icon, drop the collection name + menu items,
-   and reveal the centered document title. */
+/* Condensed: keep the sidebar toggle icon, drop the back button, collection
+   name + menu items, and reveal the centered document title. */
+body.nav-condensed .nav-back,
 body.nav-condensed .brand-name,
 body.nav-condensed .doc-selector,
 body.nav-condensed .search-widget {
@@ -794,7 +795,9 @@ body.nav-condensed .nav-doc-title {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    transition: border-color 0.15s, background 0.2s, color 0.25s, box-shadow 0.2s, transform 0.15s;
+    /* Transition only background-color (not the `background` shorthand) so the
+       chevron icon never fades/slides on hover. */
+    transition: border-color 0.15s, background-color 0.12s, color 0.25s, box-shadow 0.2s, transform 0.15s;
     appearance: none;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M3 4.5L6 7.5L9 4.5'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
@@ -802,7 +805,7 @@ body.nav-condensed .nav-doc-title {
 }
 
 .doc-select:hover {
-    background: var(--ctrl-bg-hover);
+    background-color: var(--ctrl-bg-hover);
     box-shadow: var(--ctrl-shadow-hover);
     transform: translateY(-1px);
 }
@@ -812,6 +815,7 @@ body.nav-condensed .nav-doc-title {
    The title/sidebar toggle, theme toggle and search button share one identical
    look so every navbar icon matches. */
 .brand-toggle,
+.nav-back,
 .theme-toggle,
 .search-toggle,
 .toc-toggle {
@@ -831,9 +835,10 @@ body.nav-condensed .nav-doc-title {
     cursor: pointer;
     font-size: 16px;
     flex-shrink: 0;
-    transition: background 0.2s, color 0.15s, border-color 0.25s, box-shadow 0.2s, transform 0.15s;
+    transition: background 0.2s, color 0.15s, border-color 0.25s, box-shadow 0.2s, transform 0.15s, opacity 0.2s;
 }
 .brand-toggle:hover,
+.nav-back:hover,
 .theme-toggle:hover,
 .search-toggle:hover,
 .toc-toggle:hover {
@@ -843,13 +848,25 @@ body.nav-condensed .nav-doc-title {
     transform: translateY(-1px);
 }
 .brand-toggle:active,
+.nav-back:active,
 .theme-toggle:active,
 .search-toggle:active,
 .toc-toggle:active { transform: translateY(0) scale(0.94); }
 .brand-toggle .icon,
+.nav-back .icon,
 .theme-toggle .icon,
 .search-toggle .icon,
 .toc-toggle .icon { width: 17px; height: 17px; }
+
+/* Back button: only meaningful once you've followed a link, so it stays
+   disabled (dimmed, non-interactive) until there is somewhere to go back to. */
+.nav-back:disabled {
+    opacity: 0.32;
+    cursor: default;
+    pointer-events: none;
+    box-shadow: var(--ctrl-shadow);
+    transform: none;
+}
 
 /* The brand/sidebar toggle icon carries the brand accent color. */
 .brand-toggle { color: var(--accent); }
@@ -1614,6 +1631,9 @@ body.nav-condensed .nav-doc-title {
       <button class="brand-toggle" id="sidebarToggle" title="Toggle sidebar (Ctrl+B)" aria-label="Toggle sidebar">
         <svg class="icon brand-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M0 1.75A.75.75 0 0 1 .75 1h4.253c1.227 0 2.317.59 3 1.501A3.743 3.743 0 0 1 11.006 1h4.245a.75.75 0 0 1 .75.75v10.5a.75.75 0 0 1-.75.75h-4.507a2.25 2.25 0 0 0-1.591.659l-.622.621a.75.75 0 0 1-1.06 0l-.622-.621A2.25 2.25 0 0 0 5.258 13H.75a.75.75 0 0 1-.75-.75Zm7.251 10.324.004-5.073-.002-2.253A2.25 2.25 0 0 0 5.003 2.5H1.5v9h3.757a3.75 3.75 0 0 1 1.994.574ZM8.755 4.75l-.004 7.322a3.752 3.752 0 0 1 1.992-.572H14.5v-9h-3.495a2.25 2.25 0 0 0-2.25 2.25Z"></path></svg>
       </button>
+      <button class="nav-back" id="navBack" title="Go back (Alt+&larr;)" aria-label="Go back" disabled>
+        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M7.78 12.53a.75.75 0 0 1-1.06 0L2.47 8.28a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 1.06L4.81 7.25h7.44a.75.75 0 0 1 0 1.5H4.81l2.97 2.97a.75.75 0 0 1 0 1.06Z"></path></svg>
+      </button>
       <span class="brand-name">%%DOC_TITLE%%</span>
     </div>
     <div class="doc-selector">
@@ -2233,6 +2253,7 @@ function runSearch() {
 
 function navigateToResult(result) {
     const savedQuery = searchInput.value.trim() || result.text.substring(0, 20);
+    pushHistory();
     closeSearch();
     activateTab(result.tabIdx, false);
 
@@ -2434,6 +2455,45 @@ function gotoAnchor(idx, anchor) {
     }
 }
 
+/* ───── Navigation history (browser-style back button) ─────
+   Whenever a link takes the reader to another section/document, remember where
+   they were (which tab + scroll position) so the navbar back button can return
+   them to exactly that spot. */
+const navBackBtn = document.getElementById('navBack');
+let navHistory = [];
+
+function currentTabIdx() {
+    const v = parseInt(docSelect.value, 10);
+    return isNaN(v) ? 0 : v;
+}
+
+function updateBackBtn() {
+    if (navBackBtn) navBackBtn.disabled = navHistory.length === 0;
+}
+
+function pushHistory() {
+    navHistory.push({ idx: currentTabIdx(), y: window.scrollY });
+    if (navHistory.length > 200) navHistory.shift();
+    updateBackBtn();
+}
+
+function navBack() {
+    const state = navHistory.pop();
+    if (!state) return;
+    activateTab(state.idx, false);
+    // Restore the exact scroll position after the panel becomes visible.
+    requestAnimationFrame(() => window.scrollTo({ top: state.y, behavior: 'auto' }));
+    updateBackBtn();
+}
+
+if (navBackBtn) navBackBtn.addEventListener('click', navBack);
+document.addEventListener('keydown', (e) => {
+    if (e.altKey && e.key === 'ArrowLeft' && !overlay.classList.contains('open')) {
+        e.preventDefault();
+        navBack();
+    }
+});
+
 document.addEventListener('click', function(e) {
     const link = e.target.closest('a[href]');
     if (!link) return;
@@ -2453,6 +2513,7 @@ document.addEventListener('click', function(e) {
         const target = findById(id, ownerPanel);
         if (target) {
             e.preventDefault();
+            pushHistory();
             const dest = target.closest('.tab-content');
             if (dest) {
                 const m = dest.id.match(/^panel-(\d+)$/);
@@ -2467,6 +2528,7 @@ document.addEventListener('click', function(e) {
     const md = mdTarget(href, baseDirOf(link));
     if (md) {
         e.preventDefault();
+        pushHistory();
         gotoAnchor(md.idx, md.anchor);
     }
 });
