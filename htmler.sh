@@ -276,6 +276,44 @@ def render_task_lists(body):
         '<li class="task-list-item"><input type="checkbox" checked disabled> ', body)
     return body
 
+
+# GitHub-style admonitions: "> [!NOTE]" blockquotes -> styled callout boxes.
+# Done entirely at build time so there is zero runtime/JS cost.
+CALLOUT_RE = re.compile(
+    r'<blockquote>\s*<p>\s*\[!(NOTE|TIP|WARNING|IMPORTANT|CAUTION)\]\s*'
+    r'(?:<br\s*/?>)?\s*(.*?)</blockquote>',
+    re.DOTALL | re.IGNORECASE)
+
+CALLOUT_TITLES = {
+    'note': 'Note', 'tip': 'Tip', 'warning': 'Warning',
+    'important': 'Important', 'caution': 'Caution',
+}
+
+
+def render_callouts(body):
+    """Convert `> [!NOTE]`-style blockquotes into semantic callout panels."""
+    def repl(m):
+        kind = m.group(1).lower()
+        rest = m.group(2)
+        title = CALLOUT_TITLES.get(kind, kind.title())
+        inner = '<p>' + rest if not rest.lstrip().startswith('</p>') else rest
+        return ('<div class="callout callout-{k}">'
+                '<div class="callout-title">{t}</div>'
+                '<div class="callout-body">{b}</div></div>').format(
+                    k=kind, t=title, b=inner)
+    return CALLOUT_RE.sub(repl, body)
+
+
+_TAG_RE = re.compile(r'<[^>]+>')
+
+
+def estimate_reading(body_html):
+    """Rough word count + reading-time (minutes) for the doc meta line."""
+    text = html.unescape(_TAG_RE.sub(' ', body_html))
+    words = len(text.split())
+    minutes = max(1, int(round(words / 200.0)))
+    return words, minutes
+
 def prettify(component):
     """Turn a path component like '03_patterns' into 'Patterns'."""
     c = re.sub(r'^[0-9]+[_-]', '', component)
@@ -420,12 +458,16 @@ for order, md_path in enumerate(md_files, start=1):
     md_converter.reset()
     body_html = md_converter.convert(md_text)
     body_html = render_task_lists(body_html)
+    body_html = render_callouts(body_html)
+    words, mins = estimate_reading(body_html)
     tabs.append({
         'name': tab_name,
         'path': rel_path,        # e.g. 01_pthreads/README.md
         'pathNoExt': rel_noext,  # e.g. 01_pthreads/README
         'dir': rel_dir,          # e.g. 01_pthreads  ('' for root)
         'body': body_html,
+        'words': words,
+        'mins': mins,
     })
     print("[*] Converted {0} -> {1}".format(rel_path, tab_name))
 
@@ -439,8 +481,9 @@ for t in tabs:
     escaped_dir = js_escape(t['dir'])
     escaped_body = js_escape(t['body'])
     tab_js_entries.append(
-        '  {{ name: `{name}`, path: `{path}`, dir: `{dir}`, body: `{body}` }}'.format(
-            name=escaped_name, path=escaped_path, dir=escaped_dir, body=escaped_body))
+        '  {{ name: `{name}`, path: `{path}`, dir: `{dir}`, words: {words}, mins: {mins}, body: `{body}` }}'.format(
+            name=escaped_name, path=escaped_path, dir=escaped_dir,
+            words=t['words'], mins=t['mins'], body=escaped_body))
 
 tab_data_js = 'const TAB_DATA = [\n' + ',\n'.join(tab_js_entries) + '\n];'
 
@@ -467,6 +510,7 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
 :root {
     --header-height: 56px;
     --sidebar-width: 280px;
+    /* Let the document fill the available width (no wasted screen real-estate). */
     --content-max: none;
 
     --font-sans: "Inter", -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -487,15 +531,21 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
     --glass-tint: rgba(20,22,30,0.30);
     --glass-border: rgba(255,255,255,0.10);
     --glass-highlight: rgba(255,255,255,0.14);
-    --glass-sheen: rgba(255,255,255,0.07);
     --glass-shadow: 0 10px 30px rgba(0,0,0,0.45);
     --glass-blur: 22px;
-    /* Floating glass controls (dark) */
-    --ctrl-bg: rgba(255,255,255,0.07);
-    --ctrl-bg-hover: rgba(255,255,255,0.16);
-    --ctrl-border: rgba(255,255,255,0.16);
-    --ctrl-shadow: 0 2px 8px rgba(0,0,0,0.40), inset 0 1px 0 rgba(255,255,255,0.14);
-    --ctrl-shadow-hover: 0 6px 16px rgba(0,0,0,0.50), inset 0 1px 0 rgba(255,255,255,0.22);
+    /* Shared liquid-glass backdrop filter: moderate blur + saturation so the
+       page behind shows through (transparent), Apple-style, without a milky fill. */
+    --glass-filter: blur(18px) saturate(200%);
+    /* Floating glass controls (dark) -- transparent, the blur does the work. */
+    --ctrl-bg: rgba(255,255,255,0.04);
+    --ctrl-bg-hover: rgba(255,255,255,0.09);
+    --ctrl-border: rgba(255,255,255,0.12);
+    --ctrl-shadow: 0 4px 18px rgba(0,0,0,0.30), inset 0 1px 0 rgba(255,255,255,0.18);
+    --ctrl-shadow-hover: 0 8px 26px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.26);
+    /* Light-catching rim gradient: a single highlight on the top-left diagonal
+       edge that fades to nothing before reaching the opposite side -- the
+       asymmetric, Apple-style refractive glass edge. */
+    --glass-rim: linear-gradient(135deg, rgba(255,255,255,0.32) 0%, rgba(255,255,255,0.08) 16%, rgba(255,255,255,0) 42%);
     --bg-sidebar: #0e1016;
     --bg-content: #0b0d12;
     --bg-code-block: #14161f;
@@ -558,15 +608,18 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
     --glass-tint: rgba(255,255,255,0.35);
     --glass-border: rgba(255,255,255,0.65);
     --glass-highlight: rgba(255,255,255,0.85);
-    --glass-sheen: rgba(255,255,255,0.55);
     --glass-shadow: 0 10px 30px rgba(16,24,40,0.12);
     --glass-blur: 22px;
-    /* Floating glass controls (light) */
-    --ctrl-bg: rgba(255,255,255,0.6);
-    --ctrl-bg-hover: rgba(255,255,255,0.92);
-    --ctrl-border: rgba(16,24,40,0.10);
-    --ctrl-shadow: 0 2px 8px rgba(16,24,40,0.12), inset 0 1px 0 rgba(255,255,255,0.85);
-    --ctrl-shadow-hover: 0 6px 16px rgba(16,24,40,0.18), inset 0 1px 0 rgba(255,255,255,0.95);
+    --glass-filter: blur(18px) saturate(190%);
+    /* Floating glass controls (light) -- transparent, the blur does the work. */
+    --ctrl-bg: rgba(255,255,255,0.35);
+    --ctrl-bg-hover: rgba(255,255,255,0.55);
+    --ctrl-border: rgba(255,255,255,0.6);
+    --ctrl-shadow: 0 4px 18px rgba(16,24,40,0.10), inset 0 1px 0 rgba(255,255,255,0.8);
+    --ctrl-shadow-hover: 0 8px 26px rgba(16,24,40,0.16), inset 0 1px 0 rgba(255,255,255,0.95);
+    /* Light-catching rim gradient: brightest at the top-left/bottom-right
+       corners, dimmer along the edges -- a refractive glass edge. */
+    --glass-rim: linear-gradient(135deg, rgba(255,255,255,0.85) 0%, rgba(255,255,255,0.3) 16%, rgba(255,255,255,0) 42%);
     --bg-sidebar: #ffffff;
     --bg-content: #ffffff;
     --bg-code-block: #f4f5fa;
@@ -626,7 +679,14 @@ html {
     /* Honour the device safe-area (notch / home indicator) on iOS. */
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
+    /* Hide the browser's main page scrollbar (right + bottom) while keeping
+       the page fully scrollable. Per-component scrollbars (sidebars, code
+       blocks, tables) keep their own styled thin scrollbars. */
+    scrollbar-width: none;        /* Firefox */
+    -ms-overflow-style: none;     /* legacy Edge/IE */
 }
+html::-webkit-scrollbar,
+body::-webkit-scrollbar { width: 0; height: 0; display: none; }  /* WebKit/Blink */
 [data-theme="light"] { color-scheme: light; }
 
 body {
@@ -693,25 +753,46 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-weight: 700;
-    font-size: 14px;
+    /* Keep this perfectly in sync with .doc-select so the title looks identical
+       whether it is shown in the picker or floating in the condensed navbar. */
+    font-weight: 600;
+    font-size: 13px;
     letter-spacing: -0.01em;
     color: var(--text-primary);
     background: var(--ctrl-bg);
     border: 1px solid var(--ctrl-border);
     box-shadow: var(--ctrl-shadow);
-    -webkit-backdrop-filter: blur(10px);
-    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: var(--glass-filter);
+    backdrop-filter: var(--glass-filter);
     padding: 7px 18px;
     border-radius: 999px;
     opacity: 0;
     pointer-events: none;
-    transition: opacity 0.28s ease, transform 0.28s ease;
+    transition: opacity 0.4s cubic-bezier(0.32,0.72,0,1), transform 0.4s cubic-bezier(0.32,0.72,0,1);
 }
 
 /* Smoothly fade/lift the menu items in and out as the bar condenses. */
 .brand-name, .doc-selector, .search-widget {
-    transition: opacity 0.25s ease, transform 0.25s ease;
+    transition: opacity 0.4s cubic-bezier(0.32,0.72,0,1), transform 0.4s cubic-bezier(0.32,0.72,0,1);
+}
+
+/* Apple-style entrance for the navbar controls when the page first loads:
+   a soft fade with a gentle scale-up (no sliding). `backwards` keeps them
+   hidden during their delay but reverts to normal afterwards so the condense
+   transitions above keep working. */
+@keyframes nav-pop-in {
+    from { opacity: 0; transform: scale(0.94); }
+    to   { opacity: 1; transform: none; }
+}
+.brand, .doc-selector, .search-widget {
+    animation: nav-pop-in 0.6s cubic-bezier(0.32, 0.72, 0, 1) backwards;
+}
+.brand         { animation-delay: 0.04s; }
+.doc-selector  { animation-delay: 0.10s; }
+.search-widget { animation-delay: 0.16s; }
+
+@media (prefers-reduced-motion: reduce) {
+    .brand, .doc-selector, .search-widget { animation: none; }
 }
 
 /* Condensed: keep the sidebar toggle icon, drop the back button, collection
@@ -760,6 +841,8 @@ body.nav-condensed .nav-doc-title {
     gap: 8px;
     min-width: 0;
     flex-shrink: 1;
+    /* Push the picker to the right so it sits alongside the navbar buttons. */
+    margin-left: auto;
 }
 
 .doc-selector-label {
@@ -780,13 +863,16 @@ body.nav-condensed .nav-doc-title {
     background: var(--ctrl-bg);
     border: 1px solid var(--ctrl-border);
     box-shadow: var(--ctrl-shadow);
-    -webkit-backdrop-filter: blur(8px);
-    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: var(--glass-filter);
+    backdrop-filter: var(--glass-filter);
     color: var(--text-primary);
     font-family: inherit;
     font-size: 13px;
     font-weight: 600;
-    padding: 7px 30px 7px 14px;
+    /* Match the 36px height of the navbar icon buttons exactly. */
+    box-sizing: border-box;
+    height: 36px;
+    padding: 0 30px 0 14px;
     border-radius: 999px;
     outline: none;
     cursor: pointer;
@@ -796,8 +882,8 @@ body.nav-condensed .nav-doc-title {
     text-overflow: ellipsis;
     white-space: nowrap;
     /* Transition only background-color (not the `background` shorthand) so the
-       chevron icon never fades/slides on hover. */
-    transition: border-color 0.15s, background-color 0.12s, color 0.25s, box-shadow 0.2s, transform 0.15s;
+       chevron icon never fades/slides on hover. Apple-style easing. */
+    transition: border-color 0.3s ease, background-color 0.3s cubic-bezier(0.32,0.72,0,1), color 0.25s ease, box-shadow 0.3s cubic-bezier(0.32,0.72,0,1), transform 0.3s cubic-bezier(0.32,0.72,0,1);
     appearance: none;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M3 4.5L6 7.5L9 4.5'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
@@ -807,8 +893,9 @@ body.nav-condensed .nav-doc-title {
 .doc-select:hover {
     background-color: var(--ctrl-bg-hover);
     box-shadow: var(--ctrl-shadow-hover);
-    transform: translateY(-1px);
+    transform: scale(1.02);
 }
+.doc-select:active { transform: scale(0.98); }
 .doc-select:focus { border-color: var(--accent); }
 
 /* === Floating circular icon buttons (Apple-style) ===
@@ -818,49 +905,136 @@ body.nav-condensed .nav-doc-title {
 .nav-back,
 .theme-toggle,
 .search-toggle,
-.toc-toggle {
+.toc-toggle,
+.doc-nav {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
+    /* A 36px-tall pill: with no label it stays square (=> circle via the big
+       radius); on hover it grows to fit the text label. */
+    min-width: 36px;
     height: 36px;
     padding: 0;
-    border-radius: 50%;
+    border-radius: 999px;
     background: var(--ctrl-bg);
     border: 1px solid var(--ctrl-border);
     box-shadow: var(--ctrl-shadow);
-    -webkit-backdrop-filter: blur(8px);
-    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: var(--glass-filter);
+    backdrop-filter: var(--glass-filter);
     color: var(--text-secondary);
     cursor: pointer;
     font-size: 16px;
     flex-shrink: 0;
-    transition: background 0.2s, color 0.15s, border-color 0.25s, box-shadow 0.2s, transform 0.15s, opacity 0.2s;
+    position: relative;
+    /* Apple-style easing: gentle, no overshoot. */
+    transition: background 0.3s cubic-bezier(0.32,0.72,0,1), color 0.2s ease, border-color 0.3s ease, box-shadow 0.3s cubic-bezier(0.32,0.72,0,1), transform 0.3s cubic-bezier(0.32,0.72,0,1), opacity 0.2s ease, padding 0.34s cubic-bezier(0.32,0.72,0,1);
 }
+/* Refractive liquid-glass rim: a bright, light-catching highlight that traces
+   the edges and corners of each button. Built as a gradient "border" using the
+   mask-compositing trick so only the 1px ring is painted. */
+.brand-toggle::after,
+.nav-back::after,
+.theme-toggle::after,
+.search-toggle::after,
+.toc-toggle::after,
+.doc-nav::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: var(--glass-rim);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+            mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+            mask-composite: exclude;
+    pointer-events: none;
+    opacity: 0.7;
+    transition: opacity 0.3s cubic-bezier(0.32,0.72,0,1);
+}
+.brand-toggle:hover::after,
+.nav-back:hover::after,
+.theme-toggle:hover::after,
+.search-toggle:hover::after,
+.toc-toggle:hover::after,
+.doc-nav:hover::after { opacity: 0.95; }
 .brand-toggle:hover,
 .nav-back:hover,
 .theme-toggle:hover,
 .search-toggle:hover,
-.toc-toggle:hover {
+.toc-toggle:hover,
+.doc-nav:hover {
     background: var(--ctrl-bg-hover);
     color: var(--accent);
     box-shadow: var(--ctrl-shadow-hover);
-    transform: translateY(-1px);
+}
+/* Hover-to-expand pill: only buttons that actually contain a .btn-label child
+   widen on hover. Removing the <span class="btn-label"> from a button's markup
+   disables its expansion while keeping all of this styling intact. */
+.brand-toggle:has(.btn-label):hover,
+.nav-back:has(.btn-label):hover,
+.theme-toggle:has(.btn-label):hover,
+.search-toggle:has(.btn-label):hover,
+.toc-toggle:has(.btn-label):hover,
+.doc-nav:has(.btn-label):hover {
+    padding: 0 14px;
 }
 .brand-toggle:active,
 .nav-back:active,
 .theme-toggle:active,
 .search-toggle:active,
-.toc-toggle:active { transform: translateY(0) scale(0.94); }
+.toc-toggle:active,
+.doc-nav:active { transform: scale(0.94); }
 .brand-toggle .icon,
 .nav-back .icon,
 .theme-toggle .icon,
 .search-toggle .icon,
-.toc-toggle .icon { width: 17px; height: 17px; }
+.toc-toggle .icon,
+.doc-nav .icon { width: 17px; height: 17px; }
 
-/* Back button: only meaningful once you've followed a link, so it stays
-   disabled (dimmed, non-interactive) until there is somewhere to go back to. */
-.nav-back:disabled {
+/* === Hover-to-expand button labels === */
+.btn-label {
+    display: inline-block;
+    max-width: 0;
+    opacity: 0;
+    margin-left: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    line-height: 1;
+    transition: max-width 0.36s cubic-bezier(0.32,0.72,0,1),
+                opacity 0.28s ease,
+                margin-left 0.36s cubic-bezier(0.32,0.72,0,1);
+}
+.brand-toggle:hover .btn-label,
+.nav-back:hover .btn-label,
+.theme-toggle:hover .btn-label,
+.search-toggle:hover .btn-label,
+.toc-toggle:hover .btn-label,
+.doc-nav:hover .btn-label {
+    max-width: 120px;
+    opacity: 1;
+    margin-left: 8px;
+}
+@media (prefers-reduced-motion: reduce) {
+    .btn-label { transition: none; }
+}
+
+/* Navbar button groups: prev/next live in their own wrapper, the search/theme/
+   TOC tools in another, so the two clusters are visually distinct. */
+.nav-btn-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* History-back and the prev/next buttons dim + disable when there is nowhere
+   to go (start/end of the collection, or no navigation history yet). */
+.nav-back:disabled,
+.doc-nav:disabled {
     opacity: 0.32;
     cursor: default;
     pointer-events: none;
@@ -868,17 +1042,17 @@ body.nav-condensed .nav-doc-title {
     transform: none;
 }
 
-/* The brand/sidebar toggle icon carries the brand accent color. */
+/* The brand/sidebar toggle icon carries the brand accent color. It stays a
+   fixed circular branding mark and does NOT expand into a labelled pill. */
 .brand-toggle { color: var(--accent); }
-.brand-toggle:hover { color: var(--text-link-hover); }
+.brand-toggle:hover { color: var(--text-link-hover); padding: 0; }
 
 /* === Search widget === */
 .search-widget {
-    margin-left: auto;
     padding: 0;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 14px;          /* larger gap separates the two button groups */
     flex-shrink: 0;
 }
 
@@ -889,6 +1063,8 @@ body.nav-condensed .nav-doc-title {
     background: var(--ctrl-bg);
     border: 1px solid var(--ctrl-border);
     box-shadow: var(--ctrl-shadow);
+    -webkit-backdrop-filter: var(--glass-filter);
+    backdrop-filter: var(--glass-filter);
     border-radius: 999px;
     padding: 3px 9px;
     line-height: 1.4;
@@ -1131,6 +1307,33 @@ body.nav-condensed .nav-doc-title {
     margin: 0;
 }
 
+/* Apple-style fade-in for the navigation entries each time a sidebar opens. */
+@keyframes nav-item-in {
+    from { opacity: 0; transform: scale(0.98); }
+    to   { opacity: 1; transform: none; }
+}
+/* Both sidebars share the exact same entrance. The left "Documents" tree nests
+   its file entries inside .nav-dir-children (not .nav-list), so it must be
+   covered too -- otherwise nested items wouldn't animate and the two sidebars
+   would look mismatched. */
+.sidebar-nav:not(.collapsed) .nav-list > li,
+.sidebar-nav:not(.collapsed) .nav-dir-children > li,
+.toc-sidebar:not(.collapsed) .nav-list > li {
+    animation: nav-item-in 0.4s cubic-bezier(0.32, 0.72, 0, 1) backwards;
+}
+.nav-list > li:nth-child(1), .nav-dir-children > li:nth-child(1) { animation-delay: 0.02s; }
+.nav-list > li:nth-child(2), .nav-dir-children > li:nth-child(2) { animation-delay: 0.05s; }
+.nav-list > li:nth-child(3), .nav-dir-children > li:nth-child(3) { animation-delay: 0.08s; }
+.nav-list > li:nth-child(4), .nav-dir-children > li:nth-child(4) { animation-delay: 0.11s; }
+.nav-list > li:nth-child(5), .nav-dir-children > li:nth-child(5) { animation-delay: 0.14s; }
+.nav-list > li:nth-child(6), .nav-dir-children > li:nth-child(6) { animation-delay: 0.17s; }
+.nav-list > li:nth-child(n+7), .nav-dir-children > li:nth-child(n+7) { animation-delay: 0.2s; }
+@media (prefers-reduced-motion: reduce) {
+    .sidebar-nav:not(.collapsed) .nav-list > li,
+    .sidebar-nav:not(.collapsed) .nav-dir-children > li,
+    .toc-sidebar:not(.collapsed) .nav-list > li { animation: none; }
+}
+
 .nav-list a {
     display: block;
     padding: 3px 10px;
@@ -1198,12 +1401,177 @@ body.nav-condensed .nav-doc-title {
     box-shadow: var(--shadow-sm);
     transition: background 0.25s, border-color 0.25s;
 }
-.tab-content.active { display: block; animation: fade-in 0.28s ease; }
+.tab-content.active { display: block; animation: fade-in 0.45s cubic-bezier(0.32, 0.72, 0, 1); }
 
 @keyframes fade-in {
-    from { opacity: 0; transform: translateY(6px); }
+    from { opacity: 0; transform: scale(0.99); }
     to   { opacity: 1; transform: none; }
 }
+
+/* === Reading progress bar (top of viewport) === */
+.read-progress {
+    position: fixed;
+    top: 0; left: 0;
+    height: 2px;
+    width: 0;
+    background: linear-gradient(90deg, var(--accent), var(--text-link-hover));
+    z-index: 120;
+    pointer-events: none;
+    /* width is set imperatively; keep the easing tiny so it tracks the scroll. */
+    transition: width 0.08s linear;
+}
+
+/* === Skip-to-content (keyboard / screen-reader) === */
+.skip-link {
+    position: fixed;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%) translateY(-150%);
+    z-index: 300;
+    background: var(--accent);
+    color: var(--nav-doc-active-fg);
+    font-weight: 700;
+    font-size: 13px;
+    padding: 8px 16px;
+    border-radius: 999px;
+    text-decoration: none;
+    transition: transform 0.2s ease;
+}
+.skip-link:focus { transform: translateX(-50%) translateY(0); }
+
+/* === Doc meta line (breadcrumb + reading time) === */
+.doc-meta {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    margin-bottom: 22px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.doc-breadcrumb { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.doc-breadcrumb .crumb-sep { opacity: 0.5; }
+.doc-reading-time {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: auto;
+    white-space: nowrap;
+}
+.doc-reading-time .icon { width: 13px; height: 13px; }
+
+/* === Back-to-top floating button === */
+.to-top {
+    position: fixed;
+    right: 22px;
+    bottom: 22px;
+    width: 40px;
+    height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: var(--ctrl-bg);
+    border: 1px solid var(--ctrl-border);
+    box-shadow: var(--ctrl-shadow);
+    -webkit-backdrop-filter: var(--glass-filter);
+    backdrop-filter: var(--glass-filter);
+    color: var(--text-secondary);
+    cursor: pointer;
+    z-index: 110;
+    opacity: 0;
+    transform: translateY(12px) scale(0.9);
+    pointer-events: none;
+    transition: opacity 0.3s cubic-bezier(0.32,0.72,0,1), transform 0.3s cubic-bezier(0.32,0.72,0,1), color 0.2s, background 0.2s;
+}
+.to-top.show { opacity: 1; transform: none; pointer-events: auto; }
+.to-top:hover { color: var(--accent); background: var(--ctrl-bg-hover); }
+.to-top:active { transform: scale(0.92); }
+.to-top .icon { width: 18px; height: 18px; }
+
+/* === Heading permalink anchors === */
+.tab-content .heading-anchor {
+    position: relative;
+    opacity: 0;
+    margin-left: 8px;
+    font-size: 0.8em;
+    color: var(--text-muted);
+    text-decoration: none;
+    border-bottom: none;
+    cursor: pointer;
+    transition: opacity 0.15s, color 0.15s;
+}
+.tab-content h1:hover .heading-anchor,
+.tab-content h2:hover .heading-anchor,
+.tab-content h3:hover .heading-anchor,
+.tab-content h4:hover .heading-anchor { opacity: 0.7; }
+.tab-content .heading-anchor:hover { opacity: 1; color: var(--accent); background: none; }
+
+/* "Link copied" confirmation bubble shown after clicking a permalink. */
+.tab-content .heading-anchor.copied { opacity: 1; color: var(--text-heading-h4); }
+.tab-content .heading-anchor.copied::after {
+    content: "Link copied";
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 6px);
+    transform: translateX(-50%);
+    background: var(--accent);
+    color: var(--nav-doc-active-fg);
+    font-family: var(--font-sans);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0;
+    padding: 3px 8px;
+    border-radius: 6px;
+    white-space: nowrap;
+    pointer-events: none;
+    box-shadow: var(--shadow-md);
+    animation: anchor-tip 1.4s ease forwards;
+}
+@keyframes anchor-tip {
+    0%      { opacity: 0; transform: translateX(-50%) translateY(4px); }
+    12%, 78% { opacity: 1; transform: translateX(-50%) translateY(0); }
+    100%    { opacity: 0; transform: translateX(-50%) translateY(-3px); }
+}
+
+/* === Callouts / admonitions (built at conversion time) === */
+.callout {
+    margin: 18px 0;
+    padding: 12px 16px 12px 14px;
+    border: 1px solid var(--border-main);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 var(--radius-md) var(--radius-md) 0;
+    background: var(--bg-blockquote);
+}
+.callout-title {
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.01em;
+    margin-bottom: 4px;
+    color: var(--accent);
+}
+.callout-body > :first-child { margin-top: 0; }
+.callout-body > :last-child { margin-bottom: 0; }
+.callout-note      { border-left-color: var(--text-link);     }
+.callout-note .callout-title    { color: var(--text-link);     }
+.callout-tip       { border-left-color: var(--text-heading-h4); }
+.callout-tip .callout-title     { color: var(--text-heading-h4); }
+.callout-important { border-left-color: var(--text-heading-h3); }
+.callout-important .callout-title { color: var(--text-heading-h3); }
+.callout-warning   { border-left-color: var(--text-heading-h2); }
+.callout-warning .callout-title { color: var(--text-heading-h2); }
+.callout-caution   { border-left-color: #e0555f; }
+.callout-caution .callout-title { color: #e0555f; }
+
+/* === Visible keyboard focus rings === */
+/* Keyboard focus ring. Do NOT set border-radius here -- modern browsers round
+   the outline to the element's own radius, and forcing a radius would square
+   off the pill-shaped document selector when focused. */
+:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+.doc-select:focus-visible, .nav-list a:focus-visible { outline-offset: 1px; }
 
 /* === Headings === */
 .tab-content h1, .tab-content h2, .tab-content h3,
@@ -1557,8 +1925,9 @@ body.nav-condensed .nav-doc-title {
         padding-left: max(12px, env(safe-area-inset-left));
         padding-right: max(12px, env(safe-area-inset-right));
     }
-    /* Let the document picker take whatever width is left. */
-    .doc-selector { flex: 1 1 auto; }
+    /* Let the document picker take whatever width is left (an auto left margin
+       would otherwise swallow the free space and block flex-grow). */
+    .doc-selector { flex: 1 1 auto; margin-left: 0; }
     .doc-select { min-width: 0; max-width: none; width: 100%; }
 
     .content-area {
@@ -1586,10 +1955,14 @@ body.nav-condensed .nav-doc-title {
     :root { --header-height: 52px; }
     body { font-size: 15px; }
     .doc-selector-label { display: none; }
+    /* Header is tight on phones: drop the prev/next pair (the picker still
+       switches documents). */
+    .nav-btn-group-docnav { display: none; }
     .header-inner { gap: 6px; }
     .search-widget { gap: 6px; }
     /* Comfortable tap targets. */
     .brand-toggle, .theme-toggle, .search-toggle, .toc-toggle { width: 38px; height: 38px; }
+    .doc-select { height: 38px; }
     .content-area { padding-top: calc(var(--header-height) + 10px); padding-bottom: 48px; }
     .tab-content { padding: 18px 14px 32px; }
     .tab-content h1 { font-size: 1.5em; padding-bottom: 12px; margin-bottom: 18px; }
@@ -1625,6 +1998,9 @@ body.nav-condensed .nav-doc-title {
 </head>
 <body data-theme="dark" class="sidebar-collapsed toc-collapsed">
 
+<a class="skip-link" href="#tabPanels">Skip to content</a>
+<div class="read-progress" id="readProgress"></div>
+
 <div class="header-bar">
   <div class="header-inner" id="headerInner">
     <div class="brand">
@@ -1632,7 +2008,7 @@ body.nav-condensed .nav-doc-title {
         <svg class="icon brand-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M0 1.75A.75.75 0 0 1 .75 1h4.253c1.227 0 2.317.59 3 1.501A3.743 3.743 0 0 1 11.006 1h4.245a.75.75 0 0 1 .75.75v10.5a.75.75 0 0 1-.75.75h-4.507a2.25 2.25 0 0 0-1.591.659l-.622.621a.75.75 0 0 1-1.06 0l-.622-.621A2.25 2.25 0 0 0 5.258 13H.75a.75.75 0 0 1-.75-.75Zm7.251 10.324.004-5.073-.002-2.253A2.25 2.25 0 0 0 5.003 2.5H1.5v9h3.757a3.75 3.75 0 0 1 1.994.574ZM8.755 4.75l-.004 7.322a3.752 3.752 0 0 1 1.992-.572H14.5v-9h-3.495a2.25 2.25 0 0 0-2.25 2.25Z"></path></svg>
       </button>
       <button class="nav-back" id="navBack" title="Go back (Alt+&larr;)" aria-label="Go back" disabled>
-        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M7.78 12.53a.75.75 0 0 1-1.06 0L2.47 8.28a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 1.06L4.81 7.25h7.44a.75.75 0 0 1 0 1.5H4.81l2.97 2.97a.75.75 0 0 1 0 1.06Z"></path></svg>
+        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.78 1.97a.75.75 0 0 1 0 1.06L3.81 6h6.44A4.75 4.75 0 0 1 15 10.75v2.5a.75.75 0 0 1-1.5 0v-2.5a3.25 3.25 0 0 0-3.25-3.25H3.81l2.97 2.97a.75.75 0 1 1-1.06 1.06L1.47 7.28a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Z"></path></svg>
       </button>
       <span class="brand-name">%%DOC_TITLE%%</span>
     </div>
@@ -1640,13 +2016,23 @@ body.nav-condensed .nav-doc-title {
       <select class="doc-select" id="docSelect" title="Switch document"></select>
     </div>
     <div class="search-widget">
-      <button class="search-toggle" id="searchTrigger" title="Search all documents (Ctrl+K)" aria-label="Search">
-        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"></path></svg>
-      </button>
-      <button class="theme-toggle" id="themeToggle" title="Toggle light/dark mode (Ctrl+Shift+L)" aria-label="Toggle theme"></button>
-      <button class="toc-toggle" id="tocToggle" title="Toggle table of contents (Ctrl+I)" aria-label="Toggle table of contents">
-        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4a1 1 0 1 1 0-2 1 1 0 0 1 0 2Zm3.75-1.5h8.5a.75.75 0 0 1 0 1.5h-8.5a.75.75 0 0 1 0-1.5Zm0 5h8.5a.75.75 0 0 1 0 1.5h-8.5a.75.75 0 0 1 0-1.5ZM2 9a1 1 0 1 1 0-2 1 1 0 0 1 0 2Zm1 4a1 1 0 1 1-2 0 1 1 0 0 1 2 0Zm2.75-.5h8.5a.75.75 0 0 1 0 1.5h-8.5a.75.75 0 0 1 0-1.5Z"></path></svg>
-      </button>
+      <div class="nav-btn-group nav-btn-group-docnav">
+        <button class="doc-nav" id="docPrev" title="Previous document" aria-label="Previous document">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.78 12.78a.75.75 0 0 1-1.06 0L4.47 8.53a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 1.06L6.06 8l3.72 3.72a.75.75 0 0 1 0 1.06Z"></path></svg>
+        </button>
+        <button class="doc-nav" id="docNext" title="Next document" aria-label="Next document">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06Z"></path></svg>
+        </button>
+      </div>
+      <div class="nav-btn-group nav-btn-group-tools">
+        <button class="search-toggle" id="searchTrigger" title="Search all documents (Ctrl+K)" aria-label="Search">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"></path></svg>
+        </button>
+        <button class="theme-toggle" id="themeToggle" title="Toggle light/dark mode (Ctrl+Shift+L)" aria-label="Toggle theme"></button>
+        <button class="toc-toggle" id="tocToggle" title="Toggle table of contents (Ctrl+I)" aria-label="Toggle table of contents">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4a1 1 0 1 1 0-2 1 1 0 0 1 0 2Zm3.75-1.5h8.5a.75.75 0 0 1 0 1.5h-8.5a.75.75 0 0 1 0-1.5Zm0 5h8.5a.75.75 0 0 1 0 1.5h-8.5a.75.75 0 0 1 0-1.5ZM2 9a1 1 0 1 1 0-2 1 1 0 0 1 0 2Zm1 4a1 1 0 1 1-2 0 1 1 0 0 1 2 0Zm2.75-.5h8.5a.75.75 0 0 1 0 1.5h-8.5a.75.75 0 0 1 0-1.5Z"></path></svg>
+        </button>
+      </div>
     </div>
     <div class="nav-doc-title" id="navDocTitle" aria-hidden="true"></div>
   </div>
@@ -1677,6 +2063,9 @@ body.nav-condensed .nav-doc-title {
   <div class="content-area">
     <div id="tabPanels"></div>
   </div>
+  <button class="to-top" id="toTop" title="Back to top" aria-label="Back to top">
+    <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.47 7.78a.75.75 0 0 1 0-1.06l4-4a.75.75 0 0 1 1.06 0l4 4a.75.75 0 0 1-1.06 1.06L8.75 4.81V13a.75.75 0 0 1-1.5 0V4.81L4.53 7.78a.75.75 0 0 1-1.06 0Z"></path></svg>
+  </button>
   <nav class="toc-sidebar collapsed" id="tocSidebar">
     <div class="sidebar-section" id="tocSection">
       <div class="nav-title">
@@ -1706,6 +2095,20 @@ function prettify(component) {
     return c.replace(/\b\w/g, l => l.toUpperCase());
 }
 
+// Like prettify(), but keeps any leading "01_"/"2-" style number as a "01. "
+// prefix so the sidebar mirrors the on-disk ordering of the documents.
+function prettifyKeepNum(component) {
+    const m = component.match(/^([0-9]+)[_-]/);
+    const prefix = m ? m[1] + '. ' : '';
+    return prefix + prettify(component);
+}
+
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => HTML_ESCAPES[c]); }
+function cleanName(name) { return (name || '').replace(/^\s*\d+\.\s*/, ''); }
+
+const CLOCK_ICON = '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8.75-4.25v3.94l2.4 2.4a.75.75 0 0 1-1.06 1.06l-2.62-2.62a.75.75 0 0 1-.22-.53V3.75a.75.75 0 0 1 1.5 0Z"></path></svg>';
+
 TAB_DATA.forEach((tab, idx) => {
     const opt = document.createElement('option');
     opt.value = String(idx);
@@ -1717,6 +2120,22 @@ TAB_DATA.forEach((tab, idx) => {
     panel.id = 'panel-' + idx;
     panel.dataset.dir = tab.dir || '';
     panel.innerHTML = tab.body;
+
+    // Breadcrumb + reading-time meta line (prepended, built once).
+    const meta = document.createElement('div');
+    meta.className = 'doc-meta';
+    const crumbs = cleanName(tab.name).split(' / ');
+    const crumbHtml = crumbs.map((c, i) =>
+        '<span class="crumb">' + escapeHtml(c) + '</span>' +
+        (i < crumbs.length - 1 ? '<span class="crumb-sep">/</span>' : '')
+    ).join('');
+    const words = (tab.words || 0).toLocaleString();
+    meta.innerHTML =
+        '<span class="doc-breadcrumb">' + crumbHtml + '</span>' +
+        '<span class="doc-reading-time">' + CLOCK_ICON +
+        (tab.mins || 1) + ' min read \u00b7 ' + words + ' words</span>';
+    panel.insertBefore(meta, panel.firstChild);
+
     tabPanels.appendChild(panel);
 });
 
@@ -1761,7 +2180,7 @@ function createTreeHtml(node, parentPath = '') {
         
         const label = document.createElement('span');
         label.className = 'dir-name';
-        label.textContent = prettify(dirName);
+        label.textContent = prettifyKeepNum(dirName);
         
         header.appendChild(chevron);
         header.appendChild(folder);
@@ -1786,10 +2205,10 @@ function createTreeHtml(node, parentPath = '') {
         const a = document.createElement('a');
         a.href = '#tab-' + idx;
         
-        // Use the basename or prettified name without numbers
+        // Use the basename, keeping any leading "NN_" document number prefix.
         const baseName = tab.path.split('/').pop() || tab.name;
         let displayName = baseName.replace(/\.[a-zA-Z0-9]+$/, '');
-        displayName = prettify(displayName);
+        displayName = prettifyKeepNum(displayName);
         
         a.textContent = displayName;
         a.title = tab.name;
@@ -1904,6 +2323,23 @@ docSelect.addEventListener('change', () => {
     activateTab(parseInt(docSelect.value, 10));
 });
 
+/* Previous / next document buttons in the navbar. */
+const docPrevBtn = document.getElementById('docPrev');
+const docNextBtn = document.getElementById('docNext');
+if (docPrevBtn) docPrevBtn.addEventListener('click', () => {
+    const i = currentTabIdx();
+    if (i > 0) { pushHistory(); activateTab(i - 1); }
+});
+if (docNextBtn) docNextBtn.addEventListener('click', () => {
+    const i = currentTabIdx();
+    if (i < TAB_DATA.length - 1) { pushHistory(); activateTab(i + 1); }
+});
+
+function updateDocNav(idx) {
+    if (docPrevBtn) docPrevBtn.disabled = (idx <= 0);
+    if (docNextBtn) docNextBtn.disabled = (idx >= TAB_DATA.length - 1);
+}
+
 /* ───── Syntax highlighting ───── */
 
 function addCopyButton(pre, block) {
@@ -1984,34 +2420,56 @@ function getStoredTheme() {
     try { return localStorage.getItem('doc-theme'); } catch(e) { return null; }
 }
 
-function setTheme(theme) {
+const darkMql = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+function osTheme() { return (darkMql && darkMql.matches) ? 'dark' : 'light'; }
+
+// Apply a theme. `persist` is true ONLY for an explicit user action; auto/OS
+// applications must NOT write to storage, otherwise the very first auto theme
+// would look like an explicit choice and we'd stop following the OS.
+function setTheme(theme, persist) {
     document.body.setAttribute('data-theme', theme);
     hljsLink.href = theme === 'light' ? HLJS_LIGHT : HLJS_DARK;
-    themeToggleBtn.innerHTML = theme === 'light' ? ICON_SUN : ICON_MOON;
+    themeToggleBtn.innerHTML = (theme === 'light' ? ICON_SUN : ICON_MOON);
     themeToggleBtn.title = theme === 'light'
         ? 'Switch to dark mode (Ctrl+Shift+L)'
         : 'Switch to light mode (Ctrl+Shift+L)';
-    try { localStorage.setItem('doc-theme', theme); } catch(e) {}
+    if (persist) {
+        try { localStorage.setItem('doc-theme', theme); } catch(e) {}
+    }
+}
+
+function toggleTheme() {
+    const current = document.body.getAttribute('data-theme') || 'dark';
+    setTheme(current === 'dark' ? 'light' : 'dark', true);
 }
 
 (function initTheme() {
     const stored = getStoredTheme();
-    const theme = (stored === 'light' || stored === 'dark')
-        ? stored
-        : (document.body.getAttribute('data-theme') || 'dark');
-    setTheme(theme);
+    if (stored === 'light' || stored === 'dark') {
+        setTheme(stored, false);              // explicit user choice wins
+    } else {
+        setTheme(osTheme(), false);           // otherwise follow the OS (live)
+    }
 })();
 
-themeToggleBtn.addEventListener('click', () => {
-    const current = document.body.getAttribute('data-theme') || 'dark';
-    setTheme(current === 'dark' ? 'light' : 'dark');
-});
+// Live-follow the OS appearance while the reader hasn't picked a theme manually.
+if (darkMql) {
+    const onOsChange = (e) => {
+        const stored = getStoredTheme();
+        if (stored !== 'light' && stored !== 'dark') {
+            setTheme(e.matches ? 'dark' : 'light', false);
+        }
+    };
+    if (darkMql.addEventListener) darkMql.addEventListener('change', onOsChange);
+    else if (darkMql.addListener) darkMql.addListener(onOsChange);  // older Safari
+}
+
+themeToggleBtn.addEventListener('click', toggleTheme);
 
 document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'L') {
         e.preventDefault();
-        const current = document.body.getAttribute('data-theme') || 'dark';
-        setTheme(current === 'dark' ? 'light' : 'dark');
+        toggleTheme();
     }
 });
 
@@ -2044,10 +2502,12 @@ function activateTab(idx, resetScroll) {
     }
     history.replaceState(null, null, '#tab-' + idx);
     if (typeof buildToc === 'function') buildToc(idx);
-    // Reflect the active document's title in the condensing navbar.
+    // Reflect the active document's title in the condensing navbar. Use the
+    // full name (including any leading number) so it matches the picker exactly.
     if (navDocTitle && TAB_DATA[idx]) {
-        navDocTitle.textContent = TAB_DATA[idx].name.replace(/^\s*\d+\.\s*/, '');
+        navDocTitle.textContent = TAB_DATA[idx].name;
     }
+    if (typeof updateDocNav === 'function') updateDocNav(idx);
     // Jump back to the top when switching documents so the reader starts at
     // the beginning rather than wherever the previous doc was scrolled to.
     if (resetScroll) {
@@ -2055,7 +2515,26 @@ function activateTab(idx, resetScroll) {
         document.body.classList.remove('nav-condensed');
         navLastY = 0;
     }
+    LS.set('doc-last-idx', String(idx));
 }
+
+/* ───── Lightweight state persistence (no per-scroll writes) ─────
+   Remembers the last document, sidebar/TOC open state and scroll position so
+   reopening the file resumes where you left off. Writes happen only on tab
+   switch, panel toggle and page hide -- never during scrolling. */
+const LS = {
+    get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+};
+
+function persistScroll() {
+    LS.set('doc-last-idx', String(currentTabIdx()));
+    LS.set('doc-last-y', String(Math.round(window.scrollY)));
+}
+window.addEventListener('pagehide', persistScroll);
+document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') persistScroll();
+});
 
 /* ───── Search index: pre-extract plain text per block ───── */
 
@@ -2306,6 +2785,8 @@ function clearHighlights() {
 const sidebarNav = document.getElementById('sidebarNav');
 const navList = document.getElementById('navList');
 const sidebarToggle = document.getElementById('sidebarToggle');
+const readProgress = document.getElementById('readProgress');
+const toTopBtn = document.getElementById('toTop');
 let currentTocHeadings = [];
 
 function buildToc(panelIdx) {
@@ -2316,13 +2797,51 @@ function buildToc(panelIdx) {
     const headings = panel.querySelectorAll('h1, h2, h3, h4');
     headings.forEach((h, i) => {
         if (!h.id) h.id = 'autoid-' + panelIdx + '-' + i;
+        // Capture the clean heading text once (before any permalink anchor is
+        // added) so the TOC label never picks up the trailing '#'.
+        let title = h.getAttribute('data-title');
+        if (title === null) {
+            title = h.textContent;
+            h.setAttribute('data-title', title);
+            // Add a hover-revealed permalink anchor (built lazily, only for the
+            // doc currently being viewed).
+            const perma = document.createElement('a');
+            perma.className = 'heading-anchor';
+            perma.href = '#' + h.id;
+            perma.textContent = '#';
+            perma.setAttribute('aria-label', 'Copy link to this section');
+            perma.title = 'Copy link to this section';
+            const headingId = h.id;
+            perma.addEventListener('click', function(e) {
+                e.preventDefault();
+                // Keep the doc-content click handler from also firing (it would
+                // re-run scroll/history logic and resolve duplicate ids).
+                e.stopPropagation();
+                const url = location.href.split('#')[0] + '#' + headingId;
+                const flash = function() {
+                    perma.classList.remove('copied');
+                    // Force reflow so the animation restarts on rapid clicks.
+                    void perma.offsetWidth;
+                    perma.classList.add('copied');
+                    setTimeout(function() { perma.classList.remove('copied'); }, 1400);
+                };
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(url).then(flash).catch(function() { fallbackCopy(url, flash); });
+                } else {
+                    fallbackCopy(url, flash);
+                }
+                history.replaceState(null, '', '#' + headingId);
+                scrollToTarget(h);
+            });
+            h.appendChild(perma);
+        }
         const level = h.tagName.substring(1);
         const li = document.createElement('li');
         const a = document.createElement('a');
         a.href = '#' + h.id;
-        a.textContent = h.textContent;
+        a.textContent = title;
         a.className = 'nav-h' + level;
-        a.title = h.textContent;
+        a.title = title;
         a.dataset.headingId = h.id;
         a.addEventListener('click', function(e) {
             e.preventDefault();
@@ -2335,13 +2854,23 @@ function buildToc(panelIdx) {
     updateScrollSpy();
 }
 
+/* Single rAF-throttled scroll handler drives scroll-spy, the reading-progress
+   bar and the back-to-top button -- one listener doing all the work keeps
+   scrolling smooth (no extra runtime over the original two listeners). */
 let spyRaf = null;
 function updateScrollSpy() {
     if (spyRaf) return;
     spyRaf = requestAnimationFrame(() => {
         spyRaf = null;
-        if (currentTocHeadings.length === 0) return;
         const scrollY = window.scrollY;
+
+        // Reading progress + back-to-top (run regardless of TOC contents).
+        const max = document.documentElement.scrollHeight - window.innerHeight;
+        const pct = max > 0 ? Math.min(100, (scrollY / max) * 100) : 0;
+        if (readProgress) readProgress.style.width = pct + '%';
+        if (toTopBtn) toTopBtn.classList.toggle('show', scrollY > 480);
+
+        if (currentTocHeadings.length === 0) return;
         const offset = 80;
         let activeEntry = currentTocHeadings[0];
         for (const entry of currentTocHeadings) {
@@ -2364,8 +2893,6 @@ function updateScrollSpy() {
     });
 }
 
-window.addEventListener('scroll', updateScrollSpy, { passive: true });
-
 /* ───── iOS-style condensing navbar (hide on scroll down, show on scroll up) ───── */
 function updateNavCondense() {
     const y = window.scrollY;
@@ -2381,7 +2908,18 @@ function updateNavCondense() {
     }
     navLastY = y;
 }
-window.addEventListener('scroll', updateNavCondense, { passive: true });
+
+/* One scroll listener for everything (was two). */
+window.addEventListener('scroll', function () {
+    updateNavCondense();
+    updateScrollSpy();
+}, { passive: true });
+
+if (toTopBtn) {
+    toTopBtn.addEventListener('click', function () {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+}
 
 const tocSidebar = document.getElementById('tocSidebar');
 const tocToggle = document.getElementById('tocToggle');
@@ -2393,6 +2931,7 @@ function toggleSidebar() {
         tocSidebar.classList.add('collapsed');
         document.body.classList.add('toc-collapsed');
     }
+    LS.set('doc-sidebar', collapsed ? 'closed' : 'open');
 }
 
 function toggleToc() {
@@ -2402,6 +2941,7 @@ function toggleToc() {
         sidebarNav.classList.add('collapsed');
         document.body.classList.add('sidebar-collapsed');
     }
+    LS.set('doc-toc', collapsed ? 'closed' : 'open');
 }
 
 sidebarToggle.addEventListener('click', toggleSidebar);
@@ -2536,6 +3076,19 @@ document.addEventListener('click', function(e) {
 /* ───── Startup ───── */
 /* - Nagesh N Nazare - */
 
+// Restore persisted sidebar / TOC open state (only on desktop, where the
+// drawers don't overlay the content).
+if (window.innerWidth > 1024) {
+    if (LS.get('doc-sidebar') === 'open') {
+        sidebarNav.classList.remove('collapsed');
+        document.body.classList.remove('sidebar-collapsed');
+    }
+    if (LS.get('doc-toc') === 'open') {
+        tocSidebar.classList.remove('collapsed');
+        document.body.classList.remove('toc-collapsed');
+    }
+}
+
 const hash = location.hash || '';
 const tabMatch = hash.match(/^#tab-(\d+)$/);
 if (tabMatch) {
@@ -2558,7 +3111,17 @@ if (tabMatch) {
         activateTab(0);
     }
 } else {
-    activateTab(0);
+    // No explicit target: resume the last-read document + scroll position.
+    const lastIdx = parseInt(LS.get('doc-last-idx'), 10);
+    const lastY = parseInt(LS.get('doc-last-y'), 10);
+    if (!isNaN(lastIdx) && lastIdx >= 0 && lastIdx < TAB_DATA.length) {
+        activateTab(lastIdx, false);
+        if (!isNaN(lastY) && lastY > 0) {
+            requestAnimationFrame(() => window.scrollTo({ top: lastY, behavior: 'auto' }));
+        }
+    } else {
+        activateTab(0);
+    }
 }
 </script>
 
