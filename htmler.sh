@@ -314,6 +314,117 @@ def estimate_reading(body_html):
     minutes = max(1, int(round(words / 200.0)))
     return words, minutes
 
+
+# ── ```diagram blocks → nested, colored boxes (rendered at build time) ──────
+# A small indentation-based DSL, e.g.:
+#
+#   ```diagram
+#   title: 9.1 Architecture
+#   box[blue] Zroute Command
+#     text: route_detail / route_auto / route_opt
+#     box[green] InternalEnable (RAII scope guard)
+#       text: Activated at **doDr()**, **drcChk()** scope
+#     box[red dashed] InternalForceDisable
+#       text: Overrides InternalEnable to **DISABLE** recovery
+#   ```
+#
+# Nesting is driven purely by leading-space indentation. Output is plain
+# HTML/CSS — no runtime JavaScript and no external libraries.
+DIAGRAM_FENCE_RE = re.compile(
+    r'(?ms)^[ \t]*```[ \t]*diagram[ \t]*\n(.*?)\n[ \t]*```[ \t]*$')
+
+# Alternative authoring form for "ASCII in the .md, boxes in the HTML":
+# put the DSL inside an HTML comment (invisible to Markdown viewers) and keep
+# the human-readable ASCII art in a normal fenced block right after it. At build
+# time we render the comment into boxes and DROP the immediately-following ASCII
+# fence, so the .md shows ASCII and the generated HTML shows the boxes.
+#
+#   <!--diagram
+#   title: shared_ptr layout
+#   box[blue] sp
+#     text: ptr -> Widget object
+#   -->
+#   ```
+#   sp ┌────────┐
+#      │ ptr ───┼──▶ [ Widget ]
+#      └────────┘
+#   ```
+#
+# The trailing ASCII fence is OPTIONAL: a bare <!--diagram ... --> comment just
+# renders the boxes at that spot.
+DIAGRAM_COMMENT_RE = re.compile(
+    r'(?ms)^[ \t]*<!--[ \t]*diagram[ \t]*\n'           # comment opener
+    r'(.*?)'                                            # DSL body (group 1)
+    r'^[ \t]*-->[ \t]*$'                                # comment closer
+    r'(?:(?:[ \t]*\n)*[ \t]*```[^\n]*\n.*?\n[ \t]*```[ \t]*$)?')  # optional ASCII fence to drop
+
+_DBOX_RE = re.compile(r'^box\s*\[([^\]]*)\]\s*(.*)$', re.IGNORECASE)
+_DIAGRAM_COLORS = {'blue', 'green', 'orange', 'red', 'purple', 'teal',
+                   'gray', 'grey'}
+
+
+def _diagram_inline(text):
+    """Escape HTML then apply the tiny inline markup the DSL understands."""
+    out = html.escape(text, quote=False)
+    out = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', out)
+    out = re.sub(r'`([^`]+?)`', r'<code>\1</code>', out)
+    return out
+
+
+def render_diagram_dsl(src):
+    """Parse the diagram DSL into nested box HTML."""
+    root = {'type': 'root', 'title': None, 'children': []}
+    stack = [(-1, root)]  # (indent, node) — root never pops
+    for raw in src.split('\n'):
+        if not raw.strip():
+            continue
+        indent = len(raw) - len(raw.lstrip(' '))
+        content = raw.strip()
+        if content.lower().startswith('title:'):
+            if root['title'] is None:
+                root['title'] = content.split(':', 1)[1].strip()
+            continue
+        m = _DBOX_RE.match(content)
+        if m:
+            attrs = [a for a in re.split(r'[\s,]+', m.group(1).strip().lower()) if a]
+            node = {
+                'type': 'box',
+                'title': m.group(2).strip(),
+                'colors': [a for a in attrs if a in _DIAGRAM_COLORS],
+                'dashed': 'dashed' in attrs,
+                'children': [],
+            }
+            while len(stack) > 1 and stack[-1][0] >= indent:
+                stack.pop()
+            stack[-1][1]['children'].append(node)
+            stack.append((indent, node))
+            continue
+        if content.lower().startswith('text:'):
+            content = content.split(':', 1)[1].strip()
+        node = {'type': 'text', 'text': content}
+        while len(stack) > 1 and stack[-1][0] >= indent:
+            stack.pop()
+        stack[-1][1]['children'].append(node)
+
+    def render(children):
+        parts = []
+        for c in children:
+            if c['type'] == 'box':
+                classes = ['dbox'] + c['colors'] + (['dashed'] if c['dashed'] else [])
+                title = ('<div class="dbox-title">%s</div>' % _diagram_inline(c['title'])
+                         if c['title'] else '')
+                parts.append('<div class="%s">%s%s</div>' % (
+                    ' '.join(classes), title, render(c['children'])))
+            else:
+                parts.append('<div class="dtext">%s</div>' % _diagram_inline(c['text']))
+        return ''.join(parts)
+
+    inner = ''
+    if root['title']:
+        inner += '<div class="diagram-title">%s</div>' % _diagram_inline(root['title'])
+    inner += render(root['children'])
+    return '<div class="diagram">%s</div>' % inner
+
 def prettify(component):
     """Turn a path component like '03_patterns' into 'Patterns'."""
     c = re.sub(r'^[0-9]+[_-]', '', component)
@@ -473,6 +584,10 @@ for order, md_path in enumerate(md_files, start=1):
     body_html = md_converter.convert(md_text)
     body_html = render_task_lists(body_html)
     body_html = render_callouts(body_html)
+    for i, dhtml in enumerate(diagram_html):
+        token = 'DIAGRAMBLOCK%dENDDIAGRAM' % i
+        body_html = body_html.replace('<p>%s</p>' % token, dhtml)
+        body_html = body_html.replace(token, dhtml)
     words, mins = estimate_reading(body_html)
     tabs.append({
         'name': tab_name,
@@ -1594,6 +1709,71 @@ body.nav-condensed .nav-doc-title {
 .callout-warning .callout-title { color: var(--text-heading-h2); }
 .callout-caution   { border-left-color: #e0555f; }
 .callout-caution .callout-title { color: #e0555f; }
+
+/* === Diagrams (```diagram blocks, rendered to nested boxes at build time) === */
+.diagram {
+    margin: 22px 0;
+    padding: 24px 24px 28px;
+    border: 1px solid var(--border-main);
+    border-radius: var(--radius-lg, 16px);
+    background: linear-gradient(180deg, rgba(127,127,127,0.04), transparent);
+}
+.diagram-title {
+    font-size: 17px;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    color: var(--text-primary);
+    margin-bottom: 16px;
+}
+/* A titled box. Title sits on the top border like a fieldset legend. */
+.dbox {
+    position: relative;
+    border: 1.5px solid var(--dbox-color, var(--border-main));
+    border-radius: 13px;
+    padding: 20px 20px 18px;
+    margin-top: 22px;
+    background: var(--dbox-fill, rgba(127,127,127,0.03));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), var(--shadow-md);
+}
+.dbox:first-child { margin-top: 4px; }
+.dbox > .dbox-title {
+    position: absolute;
+    top: -9px;
+    left: 18px;
+    padding: 1px 10px;
+    border-radius: 7px;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--dbox-color, var(--text-primary));
+    background: var(--bg-content);
+}
+.dbox.dashed { border-style: dashed; }
+.dtext {
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.55;
+    margin: 8px 0;
+}
+.dtext:first-of-type { margin-top: 4px; }
+.dtext:last-child { margin-bottom: 0; }
+.dtext b { color: var(--text-primary); font-weight: 700; }
+.dtext code, .dbox-title code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    background: var(--bg-code-inline);
+    padding: 1px 5px;
+    border-radius: 5px;
+}
+/* color variants drive both border + legend via a single custom property */
+.dbox.blue   { --dbox-color: var(--d-blue);   --dbox-fill: color-mix(in srgb, var(--d-blue) 7%, transparent); }
+.dbox.green  { --dbox-color: var(--d-green);  --dbox-fill: color-mix(in srgb, var(--d-green) 7%, transparent); }
+.dbox.orange { --dbox-color: var(--d-orange); --dbox-fill: color-mix(in srgb, var(--d-orange) 7%, transparent); }
+.dbox.red    { --dbox-color: var(--d-red);    --dbox-fill: color-mix(in srgb, var(--d-red) 7%, transparent); }
+.dbox.purple { --dbox-color: var(--d-purple); --dbox-fill: color-mix(in srgb, var(--d-purple) 7%, transparent); }
+.dbox.teal   { --dbox-color: var(--d-teal);   --dbox-fill: color-mix(in srgb, var(--d-teal) 7%, transparent); }
+.dbox.gray   { --dbox-color: var(--d-gray);   --dbox-fill: color-mix(in srgb, var(--d-gray) 7%, transparent); }
 
 /* === Visible keyboard focus rings === */
 /* Keyboard focus ring. Do NOT set border-radius here -- modern browsers round
