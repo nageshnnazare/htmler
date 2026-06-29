@@ -454,6 +454,20 @@ for order, md_path in enumerate(md_files, start=1):
         with open(md_path, 'r', encoding='utf-8', errors='replace') as f:
             md_text = f.read()
 
+    # Pull ```diagram blocks out before markdown sees them (their indentation
+    # and custom syntax must not be touched), leaving a plain-text token we
+    # swap back for the rendered HTML afterwards.
+    diagram_html = []
+
+    def _stash_diagram(m):
+        diagram_html.append(render_diagram_dsl(m.group(1)))
+        return '\n\nDIAGRAMBLOCK%dENDDIAGRAM\n\n' % (len(diagram_html) - 1)
+
+    # Comment form first (it may swallow a trailing ASCII fence), then the
+    # plain ```diagram fenced form.
+    md_text = DIAGRAM_COMMENT_RE.sub(_stash_diagram, md_text)
+    md_text = DIAGRAM_FENCE_RE.sub(_stash_diagram, md_text)
+
     md_text = fix_cuddled_lists(md_text)
     md_converter.reset()
     body_html = md_converter.convert(md_text)
@@ -594,6 +608,15 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
     --nav-doc-active-bg: var(--accent);
     --nav-doc-active-fg: #0a0f17;
     --scrollbar-thumb: #2a2e40;
+
+    /* Diagram (```diagram) box accent palette */
+    --d-blue: #5aa2f0;
+    --d-green: #56c98a;
+    --d-orange: #e0a23c;
+    --d-red: #e8666f;
+    --d-purple: #b58cf0;
+    --d-teal: #45c4c4;
+    --d-gray: #9aa0b4;
 }
 
 [data-theme="light"] {
@@ -668,6 +691,15 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
     --nav-doc-active-bg: var(--accent);
     --nav-doc-active-fg: #ffffff;
     --scrollbar-thumb: #d0d4e2;
+
+    /* Diagram (```diagram) box accent palette (darker for light bg contrast) */
+    --d-blue: #1f6fc4;
+    --d-green: #2f8f52;
+    --d-orange: #c1771f;
+    --d-red: #d23f4a;
+    --d-purple: #7d4fd0;
+    --d-teal: #1f8a8a;
+    --d-gray: #6a7187;
 }
 
 /* === Reset & base === */
@@ -2882,13 +2914,11 @@ function updateScrollSpy() {
         }
         currentTocHeadings.forEach(e => e.link.classList.remove('nav-active'));
         if (activeEntry) {
+            // Only update the highlight. Do NOT programmatically scroll either
+            // sidebar -- they should stay put and move only when the user
+            // scrolls them. (The previous code scrolled the wrong sidebar, the
+            // left document list, which made it jump to the top on every click.)
             activeEntry.link.classList.add('nav-active');
-            const linkTop = activeEntry.link.offsetTop;
-            const navH = sidebarNav.clientHeight;
-            const navScroll = sidebarNav.scrollTop;
-            if (linkTop < navScroll + 40 || linkTop > navScroll + navH - 40) {
-                sidebarNav.scrollTo({ top: linkTop - navH / 3, behavior: 'smooth' });
-            }
         }
     });
 }
